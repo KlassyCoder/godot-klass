@@ -1230,6 +1230,11 @@
 		<member name="filesystem/import/fbx2gltf/enabled.web" type="bool" setter="" getter="" default="false">
 			Override for [member filesystem/import/fbx2gltf/enabled] on the Web where FBX2glTF can't easily be accessed from Godot.
 		</member>
+		<member name="gdscript/conditional_compilation/flags" type="PackedStringArray" setter="" getter="" default="PackedStringArray()">
+			A list of flags that are considered [code]true[/code] for GDScript's [code]#@if[/code]/[code]#@elif[/code]/[code]#@else[/code]/[code]#@endif[/code] conditional compilation directives.
+			Flags are matched case-insensitively. A flag is also considered [code]true[/code] if [method OS.has_feature] returns [code]true[/code] for it (this covers platform, build target, and architecture feature tags, as well as any custom export preset feature tags). An identifier that is neither declared here nor a recognized feature tag evaluates to [code]false[/code], without a warning or error.
+			This setting supports the [code].feature[/code] override syntax (e.g. [code]gdscript/conditional_compilation/flags.android[/code]) so different platforms or export presets can declare different flags.
+		</member>
 		<member name="gui/common/default_scroll_deadzone" type="int" setter="" getter="" default="0">
 			Default value for [member ScrollContainer.scroll_deadzone], which will be used for all [ScrollContainer]s unless overridden.
 		</member>

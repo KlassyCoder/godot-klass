@@ -1,0 +1,14 @@
+GDTEST_OK
+if test_a
+else branch
+and true
+and true word
+or true
+or true word
+elif test_b
+parens true
+precedence with not
+and binds tighter than or
+final else
+nested both true
+literal true

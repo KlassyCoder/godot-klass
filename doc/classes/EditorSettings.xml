@@ -1773,6 +1773,9 @@
 		<member name="text_editor/theme/highlighting/gdscript/annotation_color" type="Color" setter="" getter="">
 			The GDScript syntax highlighter text color for annotations (e.g. [code]@export[/code]).
 		</member>
+		<member name="text_editor/theme/highlighting/gdscript/conditional_directive_color" type="Color" setter="" getter="">
+			The GDScript syntax highlighter text color for conditional compilation directives ([code]#@if[/code], [code]#@elif[/code], [code]#@else[/code], and [code]#@endif[/code]).
+		</member>
 		<member name="text_editor/theme/highlighting/gdscript/function_definition_color" type="Color" setter="" getter="">
 			The GDScript syntax highlighter text color for function definitions (e.g. the [code]_ready[/code] in [code]func _ready():[/code]).
 		</member>

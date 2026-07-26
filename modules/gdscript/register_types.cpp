@@ -32,6 +32,7 @@
 
 #include "gdscript.h"
 #include "gdscript_cache.h"
+#include "gdscript_conditional_compilation.h"
 #include "gdscript_parser.h"
 #include "gdscript_resource_format.h"
 #include "gdscript_tokenizer_buffer.h"
@@ -53,9 +54,11 @@
 #include "tests/test_gdscript.h"
 #endif
 
+#include "core/config/project_settings.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
+#include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 
 #ifdef TOOLS_ENABLED
@@ -107,9 +110,29 @@ protected:
 			return;
 		}
 
+		// `#@if`/`#@elif`/etc. must resolve against exactly the feature tag set this export is
+		// using: closed-world, so editor-only or test-only flags never leak into the export.
+		GDScriptConditionalCompilation::FlagSet conditional_flags;
+		conditional_flags.consult_os_features = false;
+		for (const String &feature : p_features) {
+			conditional_flags.flags.insert(StringName(feature.to_lower()));
+		}
+		const Ref<EditorExportPreset> &preset = get_export_preset();
+		if (preset.is_valid()) {
+			// Union in the `gdscript/conditional_compilation/flags` project setting, resolved
+			// through the preset so per-preset `.feature` overrides of that setting are honored.
+			const PackedStringArray extra_flags = preset->get_project_setting("gdscript/conditional_compilation/flags");
+			for (const String &flag : extra_flags) {
+				const String stripped = flag.strip_edges().to_lower();
+				if (!stripped.is_empty()) {
+					conditional_flags.flags.insert(StringName(stripped));
+				}
+			}
+		}
+
 		String source = String::utf8(reinterpret_cast<const char *>(file.ptr()), file.size());
 		GDScriptTokenizerBuffer::CompressMode compress_mode = script_mode == EditorExportPreset::MODE_SCRIPT_BINARY_TOKENS_COMPRESSED ? GDScriptTokenizerBuffer::COMPRESS_ZSTD : GDScriptTokenizerBuffer::COMPRESS_NONE;
-		file = GDScriptTokenizerBuffer::parse_code_string(source, compress_mode);
+		file = GDScriptTokenizerBuffer::parse_code_string(source, compress_mode, &conditional_flags);
 		if (file.is_empty()) {
 			return;
 		}
@@ -121,6 +144,46 @@ public:
 	virtual String get_name() const override { return "GDScript"; }
 };
 
+// Kept module-local (as opposed to hooking `editor/editor_node.cpp`) so this downstream
+// addition stays separable from upstream code and doesn't need to survive rebases there.
+static uint32_t conditional_compilation_flags_hash = 0;
+
+static uint32_t _hash_conditional_compilation_flags(const GDScriptConditionalCompilation::FlagSet &p_flags) {
+	Vector<String> sorted_flags;
+	for (const StringName &flag : p_flags.flags) {
+		sorted_flags.push_back(String(flag));
+	}
+	sorted_flags.sort();
+
+	String canonical = p_flags.consult_os_features ? "1|" : "0|";
+	for (const String &flag : sorted_flags) {
+		canonical += flag;
+		canonical += "|";
+	}
+	return canonical.hash();
+}
+
+static void _on_conditional_compilation_settings_changed() {
+	// This connection is never disconnected, so a project-setting write during teardown could reach
+	// us after the language and cache are gone. Bail out rather than touching deleted singletons.
+	if (GDScriptLanguage::get_singleton() == nullptr) {
+		return;
+	}
+
+	GDScriptConditionalCompilation::invalidate_settings_cache();
+
+	const uint32_t new_hash = _hash_conditional_compilation_flags(GDScriptConditionalCompilation::get_active_flags());
+	if (new_hash == conditional_compilation_flags_hash) {
+		return;
+	}
+	conditional_compilation_flags_hash = new_hash;
+
+	// `.gd` files aren't re-imported when flags change (GDScript has no import step), they're
+	// re-parsed: only `GDScriptCache` needs invalidating.
+	GDScriptCache::clear();
+	GDScriptLanguage::get_singleton()->reload_all_scripts();
+}
+
 static void _editor_init() {
 	Ref<GDScriptExportPlugin> gd_export;
 	gd_export.instantiate();
@@ -131,6 +194,9 @@ static void _editor_init() {
 	gdscript_syntax_highlighter.instantiate();
 	ScriptEditor::get_singleton()->register_syntax_highlighter(gdscript_syntax_highlighter);
 #endif
+
+	conditional_compilation_flags_hash = _hash_conditional_compilation_flags(GDScriptConditionalCompilation::get_active_flags());
+	ProjectSettings::get_singleton()->connect("settings_changed", callable_mp_static(&_on_conditional_compilation_settings_changed));
 }
 
 #endif // TOOLS_ENABLED
@@ -191,6 +257,7 @@ void uninitialize_gdscript_module(ModuleInitializationLevel p_level) {
 		resource_saver_gd.unref();
 
 		GDScriptParser::cleanup();
+		GDScriptConditionalCompilation::cleanup();
 		GDScriptUtilityFunctions::unregister_functions();
 	}
 

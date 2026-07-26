@@ -33,6 +33,7 @@
 #include "gdscript_analyzer.h"
 #include "gdscript_cache.h"
 #include "gdscript_compiler.h"
+#include "gdscript_conditional_compilation.h"
 #include "gdscript_parser.h"
 #include "gdscript_rpc_callable.h"
 #include "gdscript_tokenizer_buffer.h"
@@ -2909,6 +2910,10 @@ GDScriptLanguage::GDScriptLanguage() {
 	_debug_max_call_stack = GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "debug/settings/gdscript/max_call_stack", PROPERTY_HINT_RANGE, "512," + itos(GDScriptFunction::MAX_CALL_DEPTH - 1) + ",1"), 1024);
 	track_call_stack = GLOBAL_DEF_RST("debug/settings/gdscript/always_track_call_stacks", false);
 	track_locals = GLOBAL_DEF_RST("debug/settings/gdscript/always_track_local_variables", false);
+
+	// Not gated by DEBUG_ENABLED: conditional compilation must resolve identically in
+	// exported template builds, not just in the editor/debug builds.
+	GLOBAL_DEF(PropertyInfo(Variant::PACKED_STRING_ARRAY, "gdscript/conditional_compilation/flags"), PackedStringArray());
 
 #ifdef DEBUG_ENABLED
 	track_call_stack = true;

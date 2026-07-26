@@ -237,7 +237,7 @@ Error GDScriptTokenizerBuffer::set_code_buffer(const Vector<uint8_t> &p_buffer) 
 	return OK;
 }
 
-Vector<uint8_t> GDScriptTokenizerBuffer::parse_code_string(const String &p_code, CompressMode p_compress_mode) {
+Vector<uint8_t> GDScriptTokenizerBuffer::parse_code_string(const String &p_code, CompressMode p_compress_mode, const GDScriptConditionalCompilation::FlagSet *p_flags) {
 	HashMap<StringName, uint32_t> identifier_map;
 	HashMap<Variant, uint32_t> constant_map;
 	Vector<uint8_t> token_buffer;
@@ -245,6 +245,9 @@ Vector<uint8_t> GDScriptTokenizerBuffer::parse_code_string(const String &p_code,
 	HashMap<uint32_t, uint32_t> token_columns;
 
 	GDScriptTokenizerText tokenizer;
+	if (p_flags != nullptr) {
+		tokenizer.set_conditional_flags(*p_flags);
+	}
 	tokenizer.set_source_code(p_code);
 	tokenizer.set_multiline_mode(true); // Ignore whitespace tokens.
 	Token current = tokenizer.scan();

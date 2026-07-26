@@ -1,0 +1,2 @@
+GDTEST_PARSER_ERROR
+Unknown conditional compilation directive "#@ifdef". Expected "#@if", "#@elif", "#@else" or "#@endif".

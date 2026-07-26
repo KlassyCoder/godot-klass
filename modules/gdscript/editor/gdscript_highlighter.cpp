@@ -839,6 +839,16 @@ void GDScriptSyntaxHighlighter::_update_cache() {
 		global_functions.insert(E);
 	}
 
+	/* Conditional compilation directives. */
+	// These share the "#" prefix with the plain comment region, but `add_color_region()` keeps
+	// `color_regions` sorted by descending start-key length, so the longer "#@..." keys are always
+	// tested first regardless of the order they are registered in here.
+	conditional_directive_color = EDITOR_GET("text_editor/theme/highlighting/gdscript/conditional_directive_color");
+	add_color_region(ColorRegion::TYPE_CONDITIONAL_DIRECTIVE, "#@if", "", conditional_directive_color, true);
+	add_color_region(ColorRegion::TYPE_CONDITIONAL_DIRECTIVE, "#@elif", "", conditional_directive_color, true);
+	add_color_region(ColorRegion::TYPE_CONDITIONAL_DIRECTIVE, "#@else", "", conditional_directive_color, true);
+	add_color_region(ColorRegion::TYPE_CONDITIONAL_DIRECTIVE, "#@endif", "", conditional_directive_color, true);
+
 	/* Comments. */
 	const Color comment_color = EDITOR_GET("text_editor/theme/highlighting/comment_color");
 	for (const String &comment : gdscript->get_comment_delimiters()) {
@@ -1005,7 +1015,7 @@ void GDScriptSyntaxHighlighter::add_color_region(ColorRegion::Type p_type, const
 	color_region.line_only = p_line_only;
 	color_region.r_prefix = p_r_prefix;
 	color_region.is_string = p_type == ColorRegion::TYPE_STRING || p_type == ColorRegion::TYPE_MULTILINE_STRING;
-	color_region.is_comment = p_type == ColorRegion::TYPE_COMMENT || p_type == ColorRegion::TYPE_CODE_REGION;
+	color_region.is_comment = p_type == ColorRegion::TYPE_COMMENT || p_type == ColorRegion::TYPE_CODE_REGION || p_type == ColorRegion::TYPE_CONDITIONAL_DIRECTIVE;
 	color_regions.insert(at, color_region);
 	clear_highlighting_cache();
 }
