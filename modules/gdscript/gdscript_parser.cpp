@@ -1212,7 +1212,15 @@ void GDScriptParser::parse_class_body(bool p_is_multiline) {
 				} else if (previous.get_identifier() == "mastersync") {
 					push_error(R"(The "mastersync" keyword was removed in Godot 4. Use the "@rpc" annotation with "any_peer" and "call_local", and perform a check inside the function instead.)");
 				} else {
-					push_error(vformat(R"(Unexpected %s in class body.)", previous.get_debug_name()));
+					String message = vformat(R"(Unexpected %s in class body.)", previous.get_debug_name());
+					// The `> 0` test matters: `0` is the "no directive seen" sentinel, and an INDENT on
+					// line 1 would otherwise match it and blame a feature the script never used.
+					if (previous.type == GDScriptTokenizer::Token::INDENT && tokenizer->get_last_directive_line() > 0 && tokenizer->get_last_directive_line() == previous.start_line - 1) {
+						// Indenting a directive's body is the most common way to hit this, since
+						// conditional compilation directives are indentation-transparent.
+						message += R"( Conditional compilation directives ("#@if" etc.) do not start an indented block.)";
+					}
+					push_error(message);
 				}
 				break;
 		}

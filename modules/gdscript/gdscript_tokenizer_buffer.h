@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "gdscript_conditional_compilation.h"
 #include "gdscript_tokenizer.h"
 
 class GDScriptTokenizerBuffer : public GDScriptTokenizer {
@@ -68,7 +69,7 @@ public:
 
 public:
 	Error set_code_buffer(const Vector<uint8_t> &p_buffer);
-	static Vector<uint8_t> parse_code_string(const String &p_code, CompressMode p_compress_mode);
+	static Vector<uint8_t> parse_code_string(const String &p_code, CompressMode p_compress_mode, const GDScriptConditionalCompilation::FlagSet *p_flags = nullptr);
 
 	virtual int get_cursor_line() const override;
 	virtual int get_cursor_column() const override;

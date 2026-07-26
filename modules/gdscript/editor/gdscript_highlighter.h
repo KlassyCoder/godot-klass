@@ -43,6 +43,7 @@ private:
 			TYPE_MULTILINE_STRING, // `"""` and `'''`, optional prefix `r`.
 			TYPE_COMMENT, // `#` and `##`.
 			TYPE_CODE_REGION, // `#region` and `#endregion`.
+			TYPE_CONDITIONAL_DIRECTIVE, // `#@if`, `#@elif`, `#@else`, `#@endif`.
 		};
 
 		Type type = TYPE_NONE;
@@ -95,6 +96,7 @@ private:
 	Color annotation_color;
 	Color string_name_color;
 	Color type_color;
+	Color conditional_directive_color;
 
 	enum CommentMarkerLevel {
 		COMMENT_MARKER_CRITICAL,

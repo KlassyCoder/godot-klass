@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "gdscript_conditional_compilation.h"
+
 #include "core/templates/hash_map.h"
 #include "core/templates/list.h"
 #include "core/templates/vector.h"
@@ -221,6 +223,11 @@ public:
 	virtual void pop_expression_indented_block() = 0; // For lambdas, or blocks inside expressions.
 	virtual bool is_text() = 0;
 
+	// Line of the most recently handled `#@if`/`#@elif`/`#@else`/`#@endif` directive, or 0 if there
+	// was none. Lets the parser tell "you indented under a directive" apart from a plain stray
+	// indent, since directives are indentation-transparent and do not open a block.
+	virtual int get_last_directive_line() const { return 0; }
+
 	virtual Token scan() = 0;
 
 	virtual ~GDScriptTokenizer() {}
@@ -256,6 +263,22 @@ class GDScriptTokenizerText : public GDScriptTokenizer {
 	int position = 0;
 	int length = 0;
 	Vector<int> continuation_lines;
+
+	// Conditional compilation (`#@if`/`#@elif`/`#@else`/`#@endif`).
+	struct ConditionalBranch {
+		int open_line = 0; // Line of the '#@if' that opened this chain.
+		bool taken = false; // An earlier branch in this chain was selected.
+		bool else_seen = false;
+	};
+	List<ConditionalBranch> conditional_stack;
+	GDScriptConditionalCompilation::FlagSet conditional_flags;
+	Vector<Vector2i> inactive_line_ranges; // x = first excluded line, y = last, 1-based inclusive.
+	// `_advance()` re-enters `check_indent()` when it consumes the last character of the source.
+	// While a directive line is being handled, `conditional_stack` is deliberately mid-update, so
+	// that re-entrant call must not report (and clear) it as unterminated. `scan()`'s own EOF check
+	// still reports a genuinely unterminated `#@if` once the directive has finished being handled.
+	bool in_conditional_directive = false;
+	int last_directive_line = 0;
 #ifdef DEBUG_ENABLED
 	Vector<String> keyword_list;
 #endif // DEBUG_ENABLED
@@ -273,6 +296,10 @@ class GDScriptTokenizerText : public GDScriptTokenizer {
 	String _get_indent_char_name(char32_t ch);
 	void _skip_whitespace();
 	void check_indent();
+
+	bool _is_at_line_start() const;
+	bool _try_handle_conditional_directive();
+	void _skip_disabled_region();
 
 #ifdef DEBUG_ENABLED
 	void make_keyword_list();
@@ -297,8 +324,11 @@ class GDScriptTokenizerText : public GDScriptTokenizer {
 
 public:
 	void set_source_code(const String &p_source_code);
+	void set_conditional_flags(const GDScriptConditionalCompilation::FlagSet &p_flags);
 
 	const Vector<int> &get_continuation_lines() const { return continuation_lines; }
+	const Vector<Vector2i> &get_inactive_line_ranges() const { return inactive_line_ranges; }
+	virtual int get_last_directive_line() const override { return last_directive_line; }
 
 #ifdef TOOLS_ENABLED
 	virtual int get_current_position() const override { return position; }

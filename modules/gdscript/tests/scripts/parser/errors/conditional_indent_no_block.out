@@ -1,0 +1,2 @@
+GDTEST_PARSER_ERROR
+Unexpected "Indent" in class body. Conditional compilation directives ("#@if" etc.) do not start an indented block.

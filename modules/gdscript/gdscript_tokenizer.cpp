@@ -275,6 +275,14 @@ void GDScriptTokenizerText::set_source_code(const String &p_source_code) {
 	column = 1;
 	length = p_source_code.length();
 	position = 0;
+	conditional_stack.clear();
+	inactive_line_ranges.clear();
+	in_conditional_directive = false;
+	last_directive_line = 0;
+}
+
+void GDScriptTokenizerText::set_conditional_flags(const GDScriptConditionalCompilation::FlagSet &p_flags) {
+	conditional_flags = p_flags;
 }
 
 void GDScriptTokenizerText::set_cursor_position(int p_line, int p_column) {
@@ -1125,6 +1133,14 @@ void GDScriptTokenizerText::check_indent() {
 	ERR_FAIL_COND_MSG(column != 1, "Checking tokenizer indentation in the middle of a line.");
 
 	if (_is_at_end()) {
+		// `_advance()` calls this re-entrantly when it consumes the source's last character, which
+		// happens while a directive line on the last line is still being handled and its entry has
+		// not been pushed/popped yet. Reporting here would be premature and would clear the stack
+		// out from under the caller; `scan()`'s EOF check reports it correctly once we're done.
+		if (!in_conditional_directive && !conditional_stack.is_empty()) {
+			push_error(vformat("Unmatched \"#@if\" directive opened at line %d.", conditional_stack.back()->get().open_line));
+			conditional_stack.clear(); // Make sure this only gets reported once.
+		}
 		// Send dedents for every indent level.
 		pending_indents -= indent_level();
 		indent_stack.clear();
@@ -1196,6 +1212,9 @@ void GDScriptTokenizerText::check_indent() {
 			continue;
 		}
 		if (_peek() == '#') {
+			if (paren_stack.is_empty() && !line_continuation && _try_handle_conditional_directive()) {
+				continue; // Re-enter the loop at the next line.
+			}
 			// Comment. Advance to the next line.
 #ifdef TOOLS_ENABLED
 			String comment;
@@ -1271,7 +1290,11 @@ void GDScriptTokenizerText::check_indent() {
 			}
 			if ((indent_level() > 0 && indent_stack.back()->get() != indent_count) || (indent_level() == 0 && indent_count != 0)) {
 				// Mismatched indentation alignment.
-				Token error = make_error("Unindent doesn't match the previous indentation level.");
+				String message = "Unindent doesn't match the previous indentation level.";
+				if (!conditional_stack.is_empty()) {
+					message += " Conditional compilation directives (\"#@if\" etc.) do not start an indented block.";
+				}
+				Token error = make_error(message);
 				error.start_line = line;
 				error.start_column = 1;
 				error.end_column = column + 1;
@@ -1288,6 +1311,265 @@ String GDScriptTokenizerText::_get_indent_char_name(char32_t ch) {
 	ERR_FAIL_COND_V(ch != ' ' && ch != '\t', String::chr(ch).c_escape());
 
 	return ch == ' ' ? "space" : "tab";
+}
+
+bool GDScriptTokenizerText::_is_at_line_start() const {
+	const char32_t *p = _current - 1;
+	while (p >= _source) {
+		if (*p == ' ' || *p == '\t') {
+			p--;
+			continue;
+		}
+		return *p == '\n';
+	}
+	return true; // Reached the start of the buffer.
+}
+
+bool GDScriptTokenizerText::_try_handle_conditional_directive() {
+	DEV_ASSERT(_peek() == '#');
+	DEV_ASSERT(_is_at_line_start());
+	DEV_ASSERT(paren_stack.is_empty());
+	DEV_ASSERT(!line_continuation);
+
+	if (_peek(1) != '@') {
+		// Not a directive line at all; let the caller fall through to the comment path.
+		return false;
+	}
+
+	// Consuming this line can push us to EOF, and `_advance()` re-enters `check_indent()` there.
+	// Suppress its unterminated-`#@if` check until `conditional_stack` is consistent again.
+	in_conditional_directive = true;
+
+	// Read the current line's text (starting at the '#') without consuming it yet.
+	int line_len = 0;
+	while (position + line_len < length && _peek(line_len) != '\n') {
+		line_len++;
+	}
+	const String line_text = String::utf32(Span(_current, line_len));
+
+	int body_start = 0;
+	const GDScriptConditionalCompilation::Directive directive = GDScriptConditionalCompilation::identify_directive(line_text, 0, body_start);
+	DEV_ASSERT(directive != GDScriptConditionalCompilation::DIRECTIVE_NONE);
+
+	const int directive_line = line;
+	const int hash_column = column;
+	last_directive_line = directive_line;
+
+	// Split the remainder into `body`, up to an unquoted trailing '#' (an allowed trailing comment).
+	String body;
+	{
+		const int comment_pos = line_text.find_char('#', body_start);
+		const String raw_body = (comment_pos == -1) ? line_text.substr(body_start) : line_text.substr(body_start, comment_pos - body_start);
+		body = raw_body.strip_edges();
+	}
+
+#ifdef TOOLS_ENABLED
+	comments[directive_line] = CommentData(line_text, true);
+#endif // TOOLS_ENABLED
+
+	// Consume the directive's own line now, so a region skip below (if any) starts at the next line.
+	for (int i = 0; i < line_len; i++) {
+		_advance();
+	}
+	if (!_is_at_end()) {
+		_advance(); // Consume '\n'.
+	}
+	newline(false);
+
+	// Evaluates `p_body` as a condition, reporting and recovering from empty/malformed conditions.
+	// Errors "fail open" (the branch is treated as taken) so real code keeps getting compiled and
+	// any further, more specific errors still surface instead of being silently swallowed.
+	auto evaluate_or_recover = [&](const String &p_body, const char *p_directive_name) -> bool {
+		if (p_body.is_empty()) {
+			Token err = make_error(vformat("Expected a condition after \"#@%s\".", p_directive_name));
+			err.start_line = directive_line;
+			err.start_column = hash_column;
+			push_error(err);
+			return true;
+		}
+		bool result = false;
+		String eval_error;
+		if (GDScriptConditionalCompilation::evaluate_condition(p_body, conditional_flags, result, eval_error) != OK) {
+			Token err = make_error(eval_error);
+			err.start_line = directive_line;
+			err.start_column = hash_column;
+			push_error(err);
+			return true;
+		}
+		return result;
+	};
+
+	switch (directive) {
+		case GDScriptConditionalCompilation::DIRECTIVE_IF: {
+			if (conditional_stack.size() >= 32) {
+				Token err = make_error("Too many nested \"#@if\" directives (limit 32).");
+				err.start_line = directive_line;
+				err.start_column = hash_column;
+				push_error(err);
+				conditional_stack.push_back({ directive_line, true, false });
+			} else {
+				const bool taken = evaluate_or_recover(body, "if");
+				conditional_stack.push_back({ directive_line, taken, false });
+				if (!taken) {
+					_skip_disabled_region();
+				}
+			}
+		} break;
+
+		case GDScriptConditionalCompilation::DIRECTIVE_ELIF: {
+			if (conditional_stack.is_empty()) {
+				Token err = make_error("\"#@elif\" without matching \"#@if\".");
+				err.start_line = directive_line;
+				err.start_column = hash_column;
+				push_error(err);
+			} else if (conditional_stack.back()->get().else_seen) {
+				Token err = make_error("\"#@elif\" after \"#@else\".");
+				err.start_line = directive_line;
+				err.start_column = hash_column;
+				push_error(err);
+				_skip_disabled_region();
+			} else if (conditional_stack.back()->get().taken) {
+				// An earlier branch already matched; don't even evaluate this condition.
+				_skip_disabled_region();
+			} else {
+				const bool taken = evaluate_or_recover(body, "elif");
+				if (taken) {
+					conditional_stack.back()->get().taken = true;
+				} else {
+					_skip_disabled_region();
+				}
+			}
+		} break;
+
+		case GDScriptConditionalCompilation::DIRECTIVE_ELSE: {
+			if (!body.is_empty()) {
+				Token err = make_error("\"#@else\" does not take a condition.");
+				err.start_line = directive_line;
+				err.start_column = hash_column;
+				push_error(err);
+			}
+			if (conditional_stack.is_empty()) {
+				Token err = make_error("\"#@else\" without matching \"#@if\".");
+				err.start_line = directive_line;
+				err.start_column = hash_column;
+				push_error(err);
+			} else if (conditional_stack.back()->get().else_seen) {
+				Token err = make_error("\"#@else\" after \"#@else\".");
+				err.start_line = directive_line;
+				err.start_column = hash_column;
+				push_error(err);
+				_skip_disabled_region();
+			} else {
+				conditional_stack.back()->get().else_seen = true;
+				if (conditional_stack.back()->get().taken) {
+					_skip_disabled_region();
+				} else {
+					conditional_stack.back()->get().taken = true;
+				}
+			}
+		} break;
+
+		case GDScriptConditionalCompilation::DIRECTIVE_ENDIF: {
+			if (!body.is_empty()) {
+				Token err = make_error("\"#@endif\" does not take a condition.");
+				err.start_line = directive_line;
+				err.start_column = hash_column;
+				push_error(err);
+			}
+			if (conditional_stack.is_empty()) {
+				Token err = make_error("\"#@endif\" without matching \"#@if\".");
+				err.start_line = directive_line;
+				err.start_column = hash_column;
+				push_error(err);
+			} else {
+				conditional_stack.pop_back();
+			}
+		} break;
+
+		case GDScriptConditionalCompilation::DIRECTIVE_UNKNOWN: {
+			// A malformed directive keyword is a hard error (see D2), but it must not corrupt
+			// `conditional_stack`; recovering as if the line were absent gives the best cascade.
+			const String bad_keyword = line_text.substr(2, body_start - 2);
+			Token err;
+			if (bad_keyword.is_empty()) {
+				err = make_error("Expected a directive keyword after \"#@\".");
+			} else {
+				err = make_error(vformat(R"(Unknown conditional compilation directive "#@%s". Expected "#@if", "#@elif", "#@else" or "#@endif".)", bad_keyword));
+			}
+			err.start_line = directive_line;
+			err.start_column = hash_column;
+			push_error(err);
+		} break;
+
+		default:
+			break;
+	}
+
+	in_conditional_directive = false;
+	return true;
+}
+
+void GDScriptTokenizerText::_skip_disabled_region() {
+	const int start_line = line;
+	int nesting = 0;
+
+	for (;;) {
+		if (_is_at_end()) {
+			Token err = make_error(vformat("Unmatched \"#@if\" directive opened at line %d.", conditional_stack.back()->get().open_line));
+			err.start_line = line;
+			err.start_column = column;
+			push_error(err);
+			conditional_stack.clear(); // Make sure this only gets reported once.
+			break;
+		}
+
+		// Peek at the first non-whitespace characters of this line without consuming anything.
+		int probe = 0;
+		while (_peek(probe) == ' ' || _peek(probe) == '\t') {
+			probe++;
+		}
+		if (_peek(probe) == '#' && _peek(probe + 1) == '@') {
+			int line_len = 0;
+			while (position + line_len < length && _peek(line_len) != '\n') {
+				line_len++;
+			}
+			const String line_text = String::utf32(Span(_current, line_len));
+			int body_start = 0;
+			const GDScriptConditionalCompilation::Directive directive = GDScriptConditionalCompilation::identify_directive(line_text, 0, body_start);
+
+			if (directive == GDScriptConditionalCompilation::DIRECTIVE_IF) {
+				nesting++;
+			} else if (directive == GDScriptConditionalCompilation::DIRECTIVE_ENDIF) {
+				if (nesting == 0) {
+					break; // Found the matching '#@endif' at nesting level 0.
+				}
+				nesting--;
+			} else if (nesting == 0 && (directive == GDScriptConditionalCompilation::DIRECTIVE_ELIF || directive == GDScriptConditionalCompilation::DIRECTIVE_ELSE)) {
+				break; // Found the matching '#@elif'/'#@else' at nesting level 0.
+			}
+			// A DIRECTIVE_UNKNOWN line inside a disabled region is ignored, not errored:
+			// a malformed directive in a branch that isn't compiled shouldn't fail the build.
+		}
+
+		// Consume the rest of this line and move to the next one.
+		while (!_is_at_end() && _peek() != '\n') {
+			_advance();
+		}
+		if (_is_at_end()) {
+			Token err = make_error(vformat("Unmatched \"#@if\" directive opened at line %d.", conditional_stack.back()->get().open_line));
+			err.start_line = line;
+			err.start_column = column;
+			push_error(err);
+			conditional_stack.clear(); // Make sure this only gets reported once.
+			break;
+		}
+		_advance(); // Consume '\n'.
+		newline(false);
+	}
+
+	if (line - 1 >= start_line) {
+		inactive_line_ranges.push_back(Vector2i(start_line, line - 1));
+	}
 }
 
 void GDScriptTokenizerText::_skip_whitespace() {
@@ -1323,6 +1605,9 @@ void GDScriptTokenizerText::_skip_whitespace() {
 				check_indent();
 				break;
 			case '#': {
+				if (_is_at_line_start() && paren_stack.is_empty() && !line_continuation && _try_handle_conditional_directive()) {
+					break;
+				}
 				// Comment.
 #ifdef TOOLS_ENABLED
 				String comment;
@@ -1390,6 +1675,11 @@ GDScriptTokenizer::Token GDScriptTokenizerText::scan() {
 	}
 
 	if (_is_at_end()) {
+		if (!conditional_stack.is_empty()) {
+			push_error(vformat("Unmatched \"#@if\" directive opened at line %d.", conditional_stack.back()->get().open_line));
+			conditional_stack.clear(); // Make sure this only gets reported once.
+			return pop_error();
+		}
 		return make_token(Token::TK_EOF);
 	}
 
@@ -1641,4 +1931,5 @@ GDScriptTokenizerText::GDScriptTokenizerText() {
 #ifdef DEBUG_ENABLED
 	make_keyword_list();
 #endif // DEBUG_ENABLED
+	conditional_flags = GDScriptConditionalCompilation::get_active_flags();
 }

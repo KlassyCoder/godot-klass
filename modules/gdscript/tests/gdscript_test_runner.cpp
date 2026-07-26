@@ -33,6 +33,7 @@
 #include "../gdscript.h"
 #include "../gdscript_analyzer.h"
 #include "../gdscript_compiler.h"
+#include "../gdscript_conditional_compilation.h"
 #include "../gdscript_parser.h"
 #include "../gdscript_tokenizer_buffer.h"
 
@@ -165,12 +166,21 @@ GDScriptTestRunner::GDScriptTestRunner(const String &p_source_dir, bool p_init_l
 	GDScriptParser::update_project_settings();
 #endif // DEBUG_ENABLED
 
+	// Deterministic conditional compilation flags: closed-world, so `#@if` in test fixtures
+	// doesn't flip depending on the build the tests happen to run under (e.g. `dev_build=yes`
+	// vs `target=template_release`).
+	GDScriptConditionalCompilation::FlagSet conditional_flags;
+	conditional_flags.consult_os_features = false;
+	conditional_flags.flags = { "test_a", "test_b" };
+	GDScriptConditionalCompilation::set_override_flags(conditional_flags);
+
 	// Enable printing to show results.
 	CoreGlobals::print_line_enabled = true;
 	CoreGlobals::print_error_enabled = true;
 }
 
 GDScriptTestRunner::~GDScriptTestRunner() {
+	GDScriptConditionalCompilation::clear_override_flags();
 	test_function_name = StringName();
 	if (do_init_languages) {
 		finish_language();

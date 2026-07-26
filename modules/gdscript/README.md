@@ -35,6 +35,64 @@ This mostly happens by calling `GDScript::load_source_code()` on a `GDScript` ob
 Tokenizing is the process of converting the source code `String` into a sequence of tokens, which represent language constructs (such as `for` or `if`), identifiers, literals, etc. This happens almost exclusively during the parsing process, which asks for the next token in order to make sense of the source code. The tokenizer is only used outside of the parsing process in very rare exceptions.
 
 
+#### Conditional compilation (see [`GDScriptConditionalCompilation`](gdscript_conditional_compilation.h))
+
+GDScript supports Swift-style conditional compilation directives, resolved entirely inside `GDScriptTokenizerText` before the parser ever sees a token. An excluded branch is skipped line-by-line at the tokenizer level, so it never gets parsed, analyzed, compiled, or shipped in a `.gdc` export; it doesn't even need to be syntactically valid GDScript.
+
+```gdscript
+func _ready() -> void:
+	#@if DEBUG
+	print("debug only")
+	#@elif MOBILE
+	print("mobile")
+	#@else
+	print("other")
+	#@endif
+```
+
+Grammar:
+
+```
+directive     := WS* '#@' keyword body? WS* ( '#' any* )? EOL
+keyword       := 'if' | 'elif' | 'else' | 'endif'
+                 -- 'if'/'elif' require a non-empty body; 'else'/'endif' require an empty body.
+condition     := or_expr
+or_expr       := and_expr ( ('||' | 'or')  and_expr )*
+and_expr      := unary   ( ('&&' | 'and') unary   )*
+unary         := ('!' | 'not') unary | primary
+primary       := 'true' | 'false' | IDENTIFIER | '(' or_expr ')'
+IDENTIFIER    := [A-Za-z_][A-Za-z0-9_]*
+```
+
+Precedence is `!` > `&&` > `||`. There is no `#define`, `#undef`, `#include`, `#error`, `#ifdef`/`#ifndef`, macros with arguments, comparisons, numeric literals, arithmetic, or `defined()`. An undefined identifier evaluates to `false`, without a warning or error (matching the C preprocessor and Swift). Two independent nesting limits are enforced, both fixed at 32 and both hard errors past the limit: parenthesized subexpressions within a single condition (`CONDITION_MAX_DEPTH`), and `#@if` directives nested inside other `#@if` directives (`conditional_stack` depth).
+
+Note that only *flag identifiers* are case-insensitive; the grammar's own words are not. `true`, `false`, `and`, `or` and `not` are recognized in lowercase only, so `#@if TRUE` is not the literal `true`: it parses as an ordinary identifier, and unless a flag named `true` is declared it evaluates to `false`. For the same reason `#@if a && or` treats the trailing `or` as an operand rather than reporting a syntax error. Write the operators in lowercase.
+
+**Recognition rule.** A source line is a directive line iff (a) the first non-whitespace characters on the line are `#` immediately followed by `@` (no space between them), and (b) it is not inside an open `(`/`[`/`{` and is not a `\`-continuation line. A directive line is valid iff the maximal run of ASCII letters immediately after `#@` is exactly one of `if`, `elif`, `else`, `endif`; any other letter run, including the empty run, is a hard error (e.g. `#@ifdef`, `#@elseif`, or bare `#@`) rather than silently falling back to being treated as a comment. `#@` has no other meaning in GDScript, so this is zero-risk: no existing comment can accidentally become a directive.
+
+Mid-line `#@if` is a plain comment, silently: `x = 1 #@if FOO` is not a directive line because the `#@` doesn't start the line, so it is never an error. A directive is also indentation-transparent and does not open a block on its own:
+
+```gdscript
+# NOT VALID: body is indented but nothing opened a block.
+#@if DEBUG
+    print("debug only")
+#@endif
+
+# Directive column is irrelevant; this is equally valid:
+func _process(d: float) -> void:
+#@if DEBUG
+	print("tick")
+#@endif
+	pass
+```
+
+**Flags.** Flag identifiers are matched case-insensitively. A flag is `true` if it is listed in the `gdscript/conditional_compilation/flags` project setting (a `PackedStringArray`, supporting the `.feature` override suffix), or if `OS::has_feature()` returns `true` for it; that already covers platform, build target, architecture, and export preset custom feature tags. Editor, `.gdc` export, and runtime all resolve flags through this same mechanism, so they stay consistent by construction. Export additionally installs a closed-world override built from `EditorExportPlatform::get_features()`, so the baked `.gdc` reflects exactly the target being exported for.
+
+Editing the `gdscript/conditional_compilation/flags` project setting in the editor is a live change: `register_types.cpp` connects to `ProjectSettings`'s `settings_changed` signal, invalidates `GDScriptConditionalCompilation`'s cached flag set, and, if the resolved flags actually changed, clears `GDScriptCache` and calls `GDScriptLanguage::reload_all_scripts()` so open/loaded scripts get re-tokenized against the new flags.
+
+**Caveat:** scripts exported as text (`EditorExportPreset::MODE_SCRIPT_TEXT`) and scenes with built-in scripts ship with their full source, including excluded branches; only binary token export (the default) actually removes excluded source from the package. Prefer binary token export if conditional compilation is being used to keep code out of a shipped build.
+
+
 ### Parsing (see [`GDScriptParser`](gdscript_parser.h))
 
 The parser takes a sequence of tokens and builds [the abstract syntax tree (AST)](https://en.wikipedia.org/wiki/Abstract_syntax_tree) of the GDScript program. The AST is used in the analyzing and compilation steps, and the source code `String` and sequence of tokens are discarded. The AST-building process finds syntax errors in a GDScript program and reports them to the user.
