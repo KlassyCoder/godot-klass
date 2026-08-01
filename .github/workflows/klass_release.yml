@@ -1,0 +1,170 @@
+name: Klass fork release build
+
+# Manually-triggered build of the godot-klass fork (editor + export templates for
+# Linux/Windows/macOS), published as a GitHub release on this repo. These builds are meant
+# to be rare - only run this when the fork actually needs to move forward (e.g. after
+# rebasing klass-4.7 onto a newer upstream stable tag, or adding a new fork feature).
+#
+# Consumers (e.g. godot-game-food-delivery-1's CI) install straight off beatrice, not off
+# these releases - this job also refreshes beatrice's own install so that other jobs on
+# this runner pick up the new build immediately. The GitHub release is the durable,
+# downloadable record of each build; only the 5 most recent are kept.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch/tag/commit to build"
+        required: true
+        default: "klass-4.7"
+
+jobs:
+  build:
+    name: Build editor + export templates
+    runs-on: [self-hosted, beatrice]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Determine version string
+        id: version
+        run: |
+          VERSION=$(python3 -c "
+          import version
+          v = f'{version.major}.{version.minor}'
+          if version.patch:
+              v += f'.{version.patch}'
+          v += f'.{version.status}{version.module_config}'
+          print(v)
+          ")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Build editor (linuxbsd)
+        run: scons -j6 platform=linuxbsd target=editor production=yes
+
+      - name: Build Linux templates
+        run: |
+          scons -j6 platform=linuxbsd target=template_release production=yes
+          scons -j6 platform=linuxbsd target=template_debug production=yes
+
+      - name: Build Windows x86_64 template
+        run: scons -j6 platform=windows target=template_release arch=x86_64 production=yes d3d12=no accesskit=no
+
+      - name: Build Windows arm64 template
+        run: scons -j6 platform=windows target=template_release arch=arm64 production=yes d3d12=no accesskit=no
+        env:
+          MINGW_PREFIX: /home/coreyklass/build/llvm-mingw
+
+      - name: Build macOS objects (x86_64 + arm64)
+        # Expected to fail at the final link - Ubuntu's clang doesn't ship Darwin's
+        # compiler-rt, so ___isPlatformVersionAtLeast is missing. Objects still get built;
+        # the next step finishes the link with that symbol supplied manually.
+        continue-on-error: true
+        env:
+          OSXCROSS_ROOT: /home/coreyklass/build/osxcross
+        run: |
+          set +e
+          export PATH=/home/coreyklass/build/osxcross/target/bin:$PATH
+          scons -j6 platform=macos target=template_release production=yes lto=none osxcross_sdk=darwin24.4 arch=x86_64 vulkan=no
+          scons -j6 platform=macos target=template_release production=yes lto=none osxcross_sdk=darwin24.4 arch=arm64 vulkan=no
+          exit 0
+
+      - name: Link macOS templates (with compiler-rt os_version_check shim)
+        env:
+          OSXCROSS_ROOT: /home/coreyklass/build/osxcross
+        run: |
+          export PATH=/home/coreyklass/build/osxcross/target/bin:$PATH
+          curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/main/compiler-rt/lib/builtins/os_version_check.c -o /tmp/os_version_check.c
+          x86_64-apple-darwin24.4-clang -arch x86_64 -mmacosx-version-min=10.13 \
+            -isysroot "$OSXCROSS_ROOT/target/SDK/MacOSX15.4.sdk" -c /tmp/os_version_check.c -o /tmp/os_version_check.x86_64.o
+          aarch64-apple-darwin24.4-clang -arch arm64 -mmacosx-version-min=11.0 \
+            -isysroot "$OSXCROSS_ROOT/target/SDK/MacOSX15.4.sdk" -c /tmp/os_version_check.c -o /tmp/os_version_check.arm64.o
+
+          for arch in x86_64 arm64; do
+            if [ ! -f "bin/godot.macos.template_release.$arch" ]; then
+              echo "Relinking macos.$arch with os_version_check.o"
+              LINKCMD=$(scons -j1 verbose=yes platform=macos target=template_release production=yes lto=none \
+                osxcross_sdk=darwin24.4 arch=$arch vulkan=no 2>&1 | grep -- "-apple-darwin24.4-c++ -o bin/godot.macos.template_release.$arch ")
+              LINKCMD="${LINKCMD/ -lpthread -lz/ \/tmp\/os_version_check.$arch.o -lpthread -lz}"
+              eval "$LINKCMD"
+            fi
+          done
+
+          test -f bin/godot.macos.template_release.x86_64
+          test -f bin/godot.macos.template_release.arm64
+
+      - name: Package macOS universal template
+        run: |
+          llvm-lipo-20 -create -output bin/godot_macos_release.universal \
+            bin/godot.macos.template_release.x86_64 bin/godot.macos.template_release.arm64
+          rm -rf /tmp/macos_pkg
+          mkdir -p /tmp/macos_pkg/macos_template.app/Contents/MacOS
+          cp -r misc/dist/macos_template.app/Contents/Info.plist misc/dist/macos_template.app/Contents/PkgInfo misc/dist/macos_template.app/Contents/Resources /tmp/macos_pkg/macos_template.app/Contents/
+          cp bin/godot_macos_release.universal /tmp/macos_pkg/macos_template.app/Contents/MacOS/godot_macos_release.universal
+          chmod +x /tmp/macos_pkg/macos_template.app/Contents/MacOS/godot_macos_release.universal
+          (cd /tmp/macos_pkg && zip -rXq macos.zip macos_template.app)
+
+      - name: Assemble release assets
+        id: assets
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OUT=/tmp/klass_release_assets
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          cp bin/godot.linuxbsd.editor.x86_64 "$OUT/godot-klass.linuxbsd.editor.x86_64"
+          cp bin/godot.linuxbsd.template_release.x86_64 "$OUT/linux_release.x86_64"
+          cp bin/godot.linuxbsd.template_debug.x86_64 "$OUT/linux_debug.x86_64"
+          cp bin/godot.windows.template_release.x86_64.exe "$OUT/windows_release_x86_64.exe"
+          cp bin/godot.windows.template_release.x86_64.console.exe "$OUT/windows_release_x86_64.console.exe"
+          cp bin/godot.windows.template_release.arm64.llvm.exe "$OUT/windows_release_arm64.exe"
+          cp bin/godot.windows.template_release.arm64.llvm.console.exe "$OUT/windows_release_arm64.console.exe"
+          cp /tmp/macos_pkg/macos.zip "$OUT/macos.zip"
+
+          echo "dir=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Install onto beatrice for other CI jobs on this runner
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DEST="/home/coreyklass/.local/share/godot/export_templates/$VERSION"
+          mkdir -p "$DEST"
+          cp /tmp/klass_release_assets/linux_release.x86_64 "$DEST/linux_release.x86_64"
+          cp /tmp/klass_release_assets/linux_debug.x86_64 "$DEST/linux_debug.x86_64"
+          cp /tmp/klass_release_assets/windows_release_x86_64.exe "$DEST/windows_release_x86_64.exe"
+          cp /tmp/klass_release_assets/windows_release_x86_64.console.exe "$DEST/windows_release_x86_64.console.exe"
+          cp /tmp/klass_release_assets/windows_release_arm64.exe "$DEST/windows_release_arm64.exe"
+          cp /tmp/klass_release_assets/windows_release_arm64.console.exe "$DEST/windows_release_arm64.console.exe"
+          cp /tmp/klass_release_assets/macos.zip "$DEST/macos.zip"
+          chmod +x "$DEST"/linux_* "$DEST"/windows_*.exe
+          sudo cp bin/godot.linuxbsd.editor.x86_64 /usr/local/bin/godot-klass
+          sudo chmod +x /usr/local/bin/godot-klass
+          /usr/local/bin/godot-klass --version
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TAG="klass-build-$SHORT_SHA"
+
+          gh release create "$TAG" /tmp/klass_release_assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "godot-klass build $SHORT_SHA ($VERSION)" \
+            --notes "Built from \`${{ inputs.ref }}\` @ $GITHUB_SHA. Godot version: $VERSION."
+
+      - name: Prune old releases (keep 5 most recent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+          while read -r old_tag; do
+            echo "Deleting old release: $old_tag"
+            gh release delete "$old_tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done
