@@ -94,7 +94,7 @@ public:
 		ret.image_name = temp;
 		GetModuleBaseName(process, module, temp, sizeof(temp));
 		ret.module_name = temp;
-		SymLoadModule64(process, nullptr, ret.image_name.c_str(), ret.module_name.c_str(), (DWORD64)ret.base_address, ret.load_size);
+		SymLoadModule64(process, nullptr, const_cast<char *>(ret.image_name.c_str()), const_cast<char *>(ret.module_name.c_str()), (DWORD64)ret.base_address, ret.load_size);
 		return ret;
 	}
 };
